@@ -4,7 +4,7 @@ go 1.24.2
 
 require (
 	github.com/gin-gonic/gin v1.10.0
-	github.com/jasonthorsness/unlurker v0.1.2
+	github.com/jasonthorsness/unlurker v0.1.3
 	github.com/mattn/go-sqlite3 v1.14.28
 )
 
@@ -38,5 +38,3 @@ require (
 	gopkg.in/check.v1 v1.0.0-20180628173108-788fd7840127 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-replace github.com/jasonthorsness/unlurker => /home/jason/src/unlurker
