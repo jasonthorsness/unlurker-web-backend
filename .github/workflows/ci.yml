@@ -32,16 +32,8 @@ jobs:
       - name: Build
         run: make build
 
-      - name: Prepare SSH
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H ${{ secrets.VPS_HOST }}
-          ssh-keyscan -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
-
-      - name: Deploy binary
-        run: scp bin/unls ec2-user@${{ secrets.VPS_HOST }}:/home/ec2-user/unls
-
-      - name: Restart remote service
-        run: ssh ec2-user@${{ secrets.VPS_HOST }} "sudo systemctl restart ginproxy"
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: unls
+          path: bin/unls
