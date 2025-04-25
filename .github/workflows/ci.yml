@@ -1,0 +1,46 @@
+name: Build & Deploy
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.24.2"
+
+      - name: Install golangci-lint
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/v2.0.2/install.sh \
+            | sh -s -- -b "$(go env GOPATH)/bin" v2.0.2
+
+      - name: Lint
+        run: make lint
+
+      - name: Test
+        run: make test
+
+      - name: Build
+        run: make build
+
+      - name: Prepare SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Deploy binary
+        run: scp bin/unls ec2-user@${{ secrets.VPS_HOST }}:/home/ec2-user/unls
+
+      - name: Restart remote service
+        run: ssh ec2-user@${{ secrets.VPS_HOST }} "sudo systemctl restart ginproxy"
