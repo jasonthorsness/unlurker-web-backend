@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"html"
 	"log"
 	"net/http"
 	"os"
@@ -13,6 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/jasonthorsness/unlurker/hn"
+	"github.com/jasonthorsness/unlurker/hn/core"
 	"github.com/jasonthorsness/unlurker/unl"
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -34,24 +33,26 @@ func main() {
 
 	r := gin.Default()
 
+	textCache := core.NewMapCache[*hn.Item, string](core.NewClock(), hn.DefaultCacheFor)
+
 	r.GET("/active", func(c *gin.Context) {
 		ctx := c.Request.Context()
 
 		window, err := time.ParseDuration(c.DefaultQuery("window", "1h"))
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid window duration"})
+			c.PureJSON(http.StatusBadRequest, gin.H{"error": "invalid window duration"})
 			return
 		}
 
 		maxAge, err := time.ParseDuration(c.DefaultQuery("max-age", "24h"))
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid max_age duration"})
+			c.PureJSON(http.StatusBadRequest, gin.H{"error": "invalid max_age duration"})
 			return
 		}
 
 		minBy, err := strconv.Atoi(c.DefaultQuery("min-by", "3"))
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid min_by"})
+			c.PureJSON(http.StatusBadRequest, gin.H{"error": "invalid min_by"})
 			return
 		}
 
@@ -61,16 +62,16 @@ func main() {
 
 		items, tree, err := unl.GetActive(ctx, client, activeAfter, agedAfter, minBy, 0)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			c.PureJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
 
-		pw := &prettyWriter{now: now, activeAfter: activeAfter, lines: []prettyLine{}}
+		pw := &prettyWriter{textCache: textCache, now: now, activeAfter: activeAfter, lines: []prettyLine{}}
 		for _, item := range items {
 			pw.writeTree(item, tree)
 		}
 
-		c.JSON(http.StatusOK, pw.lines)
+		c.PureJSON(http.StatusOK, pw.lines)
 	})
 
 	gerr = r.Run()
@@ -90,6 +91,7 @@ type prettyLine struct {
 }
 
 type prettyWriter struct {
+	textCache   *core.MapCache[*hn.Item, string]
 	now         time.Time
 	activeAfter time.Time
 	lines       []prettyLine
@@ -133,29 +135,18 @@ func findActiveChild(item *hn.Item, allByParent map[int]hn.ItemSet, activeAfter 
 
 func (pw *prettyWriter) writeItemIndent(item *hn.Item, showText bool, isActive bool, indent string) {
 	by := item.By
-	age := prettyFormatDuration(pw.now.Sub(time.Unix(item.Time, 0)))
+	age := unl.PrettyFormatDuration(pw.now.Sub(time.Unix(item.Time, 0)))
 	text := ""
 
 	if showText {
-		text = unl.PrettyFormatTitle(item, true)
+		found, _ := pw.textCache.Get([]*hn.Item{item})
+		if len(found) > 0 {
+			text = found[0].Value
+		} else {
+			text = unl.PrettyFormatTitle(item, true)
+			pw.textCache.Put(item, text)
+		}
 	}
-
-	text = html.UnescapeString(text)
 
 	pw.lines = append(pw.lines, prettyLine{by, age, indent, text, item.ID, item.Parent == nil, isActive})
-}
-
-func prettyFormatDuration(d time.Duration) string {
-	totalMinutes := int(d.Minutes())
-
-	const minutesPerHour = 60
-
-	if totalMinutes < minutesPerHour {
-		return fmt.Sprintf("%dm", totalMinutes)
-	}
-
-	hours := totalMinutes / minutesPerHour
-	minutes := totalMinutes % minutesPerHour
-
-	return fmt.Sprintf("%dh %2dm", hours, minutes)
 }
