@@ -349,13 +349,13 @@ func fetchFrontPageTimesInner(ctx context.Context, now time.Time) (interface{}, 
 			return nil, fmt.Errorf("failed to parse id: %w", err)
 		}
 
-		age, err := parseAge(string(match[3]))
+		age, gap, err := parseAge(string(match[3]))
 		if err != nil {
 			return nil, err
 		}
 
 		diff := now.Sub(t) - age
-		if diff > 2*time.Hour {
+		if diff > gap {
 			m[id] = now.Add(-age).Unix()
 		} else {
 			m[id] = ts
@@ -375,25 +375,27 @@ var errUnexpectedAgeFormat = errors.New("unexpected age format")
 var relativeAgeRegex = regexp.MustCompile(
 	`^\s*(\d+)\s+(hour|hours|minute|minutes|day|days)\s*$`)
 
-func parseAge(s string) (time.Duration, error) {
+func parseAge(s string) (time.Duration, time.Duration, error) {
 	m := relativeAgeRegex.FindStringSubmatch(s)
 	if m == nil {
-		return 0, fmt.Errorf("%w: %q", errUnexpectedAgeFormat, s)
+		return 0, 0, fmt.Errorf("%w: %q", errUnexpectedAgeFormat, s)
 	}
 
 	n, err := strconv.Atoi(m[1])
 	if err != nil {
-		return 0, fmt.Errorf("failed to parse age: %w", err)
+		return 0, 0, fmt.Errorf("failed to parse age: %w", err)
 	}
+
+	const oneDayDuration = 24 * time.Hour
 
 	switch m[2] {
 	case "minute", "minutes":
-		return time.Duration(n) * time.Minute, nil
+		return time.Duration(n) * time.Minute, 1 * time.Hour, nil
 	case "hour", "hours":
-		return time.Duration(n) * time.Hour, nil
+		return time.Duration(n) * time.Hour, 2 * time.Hour, nil
 	case "day", "days":
-		return time.Duration(n) * 24 * time.Hour, nil
+		return time.Duration(n) * oneDayDuration, oneDayDuration, nil
 	default:
-		return 0, fmt.Errorf("%w: %q", errUnexpectedAgeFormat, m[2])
+		return 0, 0, fmt.Errorf("%w: %q", errUnexpectedAgeFormat, m[2])
 	}
 }
