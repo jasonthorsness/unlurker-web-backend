@@ -57,12 +57,13 @@ type handleActiveRoot struct {
 }
 
 type handleActiveResponse struct {
-	By     string `json:"by,omitempty"`
-	Text   string `json:"text,omitempty"`
-	Age    string `json:"age"`
-	ID     int    `json:"id"`
-	Depth  int    `json:"depth"`
-	Active bool   `json:"active,omitempty"`
+	By           string `json:"by,omitempty"`
+	Text         string `json:"text,omitempty"`
+	Age          string `json:"age"`
+	ID           int    `json:"id"`
+	Depth        int    `json:"depth"`
+	Active       bool   `json:"active,omitempty"`
+	SecondChance bool   `json:"secondchance,omitempty"`
 }
 
 //nolint:cyclop // need parsing helper
@@ -114,8 +115,11 @@ func handleActive(c *gin.Context, client *hn.Client, textCache *core.MapCache[*h
 			ae := activeMap[item.ID]
 			text := ""
 
+			secondChance := false
+
 			if item.ID == root.Item.ID {
 				t = root.Time
+				secondChance = item.Time != root.Time
 			}
 
 			if ae != 0 {
@@ -128,12 +132,13 @@ func handleActive(c *gin.Context, client *hn.Client, textCache *core.MapCache[*h
 			}
 
 			response = append(response, handleActiveResponse{
-				By:     by,
-				Text:   text,
-				Age:    unl.PrettyFormatDuration(now.Sub(time.Unix(t, 0))),
-				Active: (ae & unl.ActiveMapSelf) > 0,
-				ID:     item.ID,
-				Depth:  item.Depth,
+				By:           by,
+				Text:         text,
+				Age:          unl.PrettyFormatDuration(now.Sub(time.Unix(t, 0))),
+				Active:       (ae & unl.ActiveMapSelf) > 0,
+				ID:           item.ID,
+				Depth:        item.Depth,
+				SecondChance: secondChance,
 			})
 		}
 	}
