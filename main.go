@@ -2,17 +2,11 @@ package main
 
 import (
 	"context"
-	"errors"
-	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
-	"sort"
 	"strconv"
-	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -20,7 +14,6 @@ import (
 	"github.com/jasonthorsness/unlurker/hn/core"
 	"github.com/jasonthorsness/unlurker/unl"
 	_ "github.com/mattn/go-sqlite3"
-	"golang.org/x/sync/singleflight"
 )
 
 func main() {
@@ -56,7 +49,7 @@ type handleActiveRoot struct {
 	Time int64
 }
 
-type handleActiveResponse struct {
+type handleActiveResponseItem struct {
 	By           string `json:"by,omitempty"`
 	Text         string `json:"text,omitempty"`
 	Age          string `json:"age"`
@@ -64,6 +57,11 @@ type handleActiveResponse struct {
 	Depth        int    `json:"depth"`
 	Active       bool   `json:"active,omitempty"`
 	SecondChance bool   `json:"secondchance,omitempty"`
+}
+
+type handleActiveResponse struct {
+	Items              []handleActiveResponseItem `json:"items"`
+	SecondChanceFailed bool                       `json:"secondChanceFailed"`
 }
 
 //nolint:cyclop // need parsing helper
@@ -97,13 +95,14 @@ func handleActive(c *gin.Context, client *hn.Client, textCache *core.MapCache[*h
 	now := time.Now()
 	activeAfter := now.Add(-window)
 
-	roots, tree, err := getActiveRoots(ctx, client, now, activeAfter, maxAge, minBy)
+	roots, tree, secondChanceFailed, err := getActiveRoots(ctx, client, now, activeAfter, maxAge, minBy)
 	if err != nil {
 		c.PureJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	response := make([]handleActiveResponse, 0, len(roots))
+	const estimatedItemsPerRoot = 10
+	items := make([]handleActiveResponseItem, 0, len(roots)*estimatedItemsPerRoot)
 
 	for _, root := range roots {
 		flat := unl.FlattenTree(root.Item, tree)
@@ -131,7 +130,7 @@ func handleActive(c *gin.Context, client *hn.Client, textCache *core.MapCache[*h
 				by = ""
 			}
 
-			response = append(response, handleActiveResponse{
+			items = append(items, handleActiveResponseItem{
 				By:           by,
 				Text:         text,
 				Age:          unl.PrettyFormatDuration(now.Sub(time.Unix(t, 0))),
@@ -141,6 +140,11 @@ func handleActive(c *gin.Context, client *hn.Client, textCache *core.MapCache[*h
 				SecondChance: secondChance,
 			})
 		}
+	}
+
+	response := handleActiveResponse{
+		Items:              items,
+		SecondChanceFailed: secondChanceFailed,
 	}
 
 	c.PureJSON(http.StatusOK, response)
@@ -153,32 +157,30 @@ func getActiveRoots(
 	activeAfter time.Time,
 	maxAge time.Duration,
 	minBy int,
-) ([]handleActiveRoot, map[int]hn.ItemSet, error) {
-	// need to go back quite far in case something has been pulled from the second-chance pool
-	const oneWeek = 7 * 24 * time.Hour
-	agedAfter := now.Add(-oneWeek)
+) ([]handleActiveRoot, map[int]hn.ItemSet, bool, error) {
+	var secondChanceFailed bool
 
-	items, tree, err := unl.GetActive(ctx, client, activeAfter, agedAfter, minBy, 0)
+	frontPageTimes, err := unl.FetchFrontPageTimes(ctx, now)
 	if err != nil {
-		return nil, nil, err
+		frontPageTimes = nil
+		secondChanceFailed = true
 	}
 
-	frontPageTimes, err := fetchFrontPageTimes(ctx, now)
+	agedAfter := time.Now().Add(-maxAge)
+
+	items, tree, err := unl.GetActive(ctx, client, frontPageTimes, activeAfter, agedAfter, minBy, 0)
 	if err != nil {
-		// ignoring failure to parse updated times for second-chance pool for now
-		frontPageTimes = nil
+		return nil, nil, secondChanceFailed, err
 	}
 
 	roots := make([]handleActiveRoot, 0, len(items))
 
-	agedAfter = time.Now().Add(-maxAge)
-
 	for _, item := range items {
 		t := item.Time
 
-		updated, ok := frontPageTimes[item.ID]
-		if ok && updated > item.Time {
-			t = updated
+		adjusted, ok := frontPageTimes[item.ID]
+		if ok {
+			t = adjusted
 		}
 
 		if time.Unix(t, 0).After(agedAfter) {
@@ -186,16 +188,7 @@ func getActiveRoots(
 		}
 	}
 
-	sort.Slice(roots, func(i, j int) bool {
-		a, b := roots[i], roots[j]
-		if a.Time == b.Time {
-			return a.Item.ID > b.Item.ID
-		}
-
-		return a.Time > b.Time
-	})
-
-	return roots, tree, nil
+	return roots, tree, secondChanceFailed, nil
 }
 
 type handleItemDescendantsResponse struct {
@@ -275,127 +268,4 @@ func formatText(item *hn.Item, textCache *core.MapCache[*hn.Item, string]) strin
 	textCache.Put(item, text)
 
 	return text
-}
-
-var fetchGroup singleflight.Group //nolint:gochecknoglobals
-
-var fetchCache atomic.Value //nolint:gochecknoglobals
-
-var frontPageAgeExtractor = regexp.MustCompile(
-	`<span class="age" title="[^"]+\s+(\d+)"><a href="item\?id=(\d+)">([^<]+) ago</a></span>`)
-
-type fetchCacheEntry struct {
-	data map[int]int64
-	ts   time.Time
-}
-
-var errStatusNotOK = errors.New("status not ok")
-
-func fetchFrontPageTimes(ctx context.Context, now time.Time) (map[int]int64, error) {
-	entry, ok := fetchCache.Load().(*fetchCacheEntry)
-	if ok {
-		if time.Since(entry.ts) < time.Minute {
-			return entry.data, nil
-		}
-	}
-
-	v, err, _ := fetchGroup.Do(
-		"frontpage",
-		func() (interface{}, error) { return fetchFrontPageTimesInner(ctx, now) })
-	if err != nil {
-		return nil, fmt.Errorf("singleflight frontpage failed: %w", err)
-	}
-
-	times := v.(map[int]int64) //nolint:forcetypeassert // typed return
-
-	return times, nil
-}
-
-func fetchFrontPageTimesInner(ctx context.Context, now time.Time) (interface{}, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://news.ycombinator.com", nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	res, err := http.DefaultClient.Do(request)
-	if err != nil {
-		return nil, fmt.Errorf("failed to execute request: %w", err)
-	}
-
-	defer func() { _ = res.Body.Close() }()
-
-	if res.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%w: %s", errStatusNotOK, res.Status)
-	}
-
-	body, err := io.ReadAll(res.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read body: %w", err)
-	}
-
-	matches := frontPageAgeExtractor.FindAllSubmatch(body, -1)
-	m := make(map[int]int64, len(matches))
-
-	for _, match := range matches {
-		ts, err := strconv.ParseInt(string(match[1]), 10, 64)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse time: %w", err)
-		}
-
-		t := time.Unix(ts, 0)
-
-		id, err := strconv.Atoi(string(match[2]))
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse id: %w", err)
-		}
-
-		age, gap, err := parseAge(string(match[3]))
-		if err != nil {
-			return nil, err
-		}
-
-		diff := now.Sub(t) - age
-		if diff > gap {
-			m[id] = now.Add(-age).Unix()
-		} else {
-			m[id] = ts
-		}
-	}
-
-	fetchCache.Store(&fetchCacheEntry{
-		data: m,
-		ts:   time.Now(),
-	})
-
-	return m, nil
-}
-
-var errUnexpectedAgeFormat = errors.New("unexpected age format")
-
-var relativeAgeRegex = regexp.MustCompile(
-	`^\s*(\d+)\s+(hour|hours|minute|minutes|day|days)\s*$`)
-
-func parseAge(s string) (time.Duration, time.Duration, error) {
-	m := relativeAgeRegex.FindStringSubmatch(s)
-	if m == nil {
-		return 0, 0, fmt.Errorf("%w: %q", errUnexpectedAgeFormat, s)
-	}
-
-	n, err := strconv.Atoi(m[1])
-	if err != nil {
-		return 0, 0, fmt.Errorf("failed to parse age: %w", err)
-	}
-
-	const oneDayDuration = 24 * time.Hour
-
-	switch m[2] {
-	case "minute", "minutes":
-		return time.Duration(n) * time.Minute, 1 * time.Hour, nil
-	case "hour", "hours":
-		return time.Duration(n) * time.Hour, 2 * time.Hour, nil
-	case "day", "days":
-		return time.Duration(n) * oneDayDuration, oneDayDuration, nil
-	default:
-		return 0, 0, fmt.Errorf("%w: %q", errUnexpectedAgeFormat, m[2])
-	}
 }

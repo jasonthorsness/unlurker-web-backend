@@ -1,12 +1,15 @@
 module github.com/jasonthorsness/unlurker-web/backend
 
-go 1.24.2
+go 1.24.3
 
 require (
 	github.com/gin-gonic/gin v1.10.0
-	github.com/jasonthorsness/unlurker v0.1.6
+	github.com/jasonthorsness/unlurker v0.1.7
 	github.com/mattn/go-sqlite3 v1.14.28
 )
+
+// uncomment for local development
+// replace github.com/jasonthorsness/unlurker => ../unlurker
 
 require (
 	github.com/bytedance/sonic v1.11.6 // indirect
